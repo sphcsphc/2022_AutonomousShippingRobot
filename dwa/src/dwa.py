@@ -1,10 +1,11 @@
-#!/home/scout/.pyenv/versions/spkm_py2718/bin/python
+#!/home/scout/.pyenv/versions/rospy368/bin/python
 # -- coding: utf-8 --
 
 import numpy as np
 import rospy
 import tf
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import String
 from geometry_msgs.msg import Twist, Pose, Pose2D
 from open3d_ros_helper import open3d_ros_helper as orh
 
@@ -20,26 +21,37 @@ def main():
 class DWA:
     def __init__(self, publisher):
         rospy.Subscriber('current_pose', Pose, self.current_pose)
+        rospy.Subscriber('dwa_motion_start', String, self.control_callback)
+        self.output = rospy.Publisher('dwa_motion_fin', String, queue_size=1)
         self.publisher = publisher
         self.scout_pose = Pose2D()
-        self.dwa_mode = "patrol"
-        self.home_pos = 8.14, 2.14
-        self.goal_pos = 8.4483, 1.7833
+        self.dwa_mode = "none"
+        self.home_pos = 0.00, 0.00
+        self.goal_pos = 0.00, 0.00
+
+    def control_callback(self, data):
+        self.dwa_mode = data.data
 
     def lds_callback(self, velo):
         turtle_vel = Twist()
+        goal_pos = tuple()
         mps = [0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.22, 0.24, 0.26, 0.28]
-        radps = [0, 0.2, 0.4, 0.6, 0.8, -0.2, -0.4, -0.6, -0.8, -0.9]
+        radps = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+                 -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
         data = orh.rospc_to_o3dpc(velo)
         data_array = self.preprocessing(data)
         local_pos = self.make_combination(mps, radps)
         pos_candidates = self.create_pos_candidates(local_pos)
-        if self.dwa_mode == "patrol":
+        if self.dwa_mode == "go_to_aruco":
             goal_pos = self.goal_pos
-        elif self.dwa_mode == "home":
+        elif self.dwa_mode == "go_to_home":
             goal_pos = self.home_pos
+        else:
+            return
         if np.hypot(goal_pos[0] - self.scout_pose.x, goal_pos[1] - self.scout_pose.y) <= 0.8:
             turtle_vel.linear.x, turtle_vel.angular.z = 0., 0.
+            self.dwa_mode = "none"
+            self.output.publish("dwa_fin")
         else:
             best_score, back_check = self.evaluate_scores(pos_candidates, goal_pos, data_array, local_pos)
             turtle_vel.linear.x, turtle_vel.angular.z = mps[best_score[0]], radps[best_score[1]]
@@ -87,7 +99,7 @@ class DWA:
         remaining_scores = self.find_remaining_scores(pos_candidates, goal_pos)
         obstacle_distance, obstacle_scores = self.find_obstacle_scores(data_array, local_pos)
         clearance_scores = self.find_clearance_scores(data_array, local_pos)
-        scores = 1.6 * remaining_scores + obstacle_scores + clearance_scores
+        scores = 1.6 * remaining_scores + 1.2 * obstacle_scores + clearance_scores
         best_score = np.unravel_index(np.argmax(scores), scores.shape)
         return best_score, obstacle_distance[best_score] <= 0.43
 
@@ -95,7 +107,7 @@ class DWA:
     def find_remaining_scores(pos_candidates, goal_pos):
         x = goal_pos[0] - np.delete(pos_candidates, 1, axis=1)
         y = goal_pos[1] - np.delete(pos_candidates, 0, axis=1)
-        scores = 1 / np.reshape(np.hypot(x, y), (10, 10))
+        scores = 1 / np.reshape(np.hypot(x, y), (10, 20))
         norm = np.linalg.norm(scores)
         scores = scores / norm
         return scores
@@ -104,7 +116,7 @@ class DWA:
     def find_obstacle_scores(data_array, local_pos):
         x = data_array[:, 0] - np.delete(local_pos, 1, axis=1)
         y = data_array[:, 1] - np.delete(local_pos, 0, axis=1)
-        distance = np.reshape(np.amin(np.hypot(x, y), axis=1), (10, 10))
+        distance = np.reshape(np.amin(np.hypot(x, y), axis=1), (10, 20))
         scores = np.where(distance <= 0.43, 0, distance)
         if np.any(scores) != 0:
             norm = np.linalg.norm(scores)
@@ -117,7 +129,7 @@ class DWA:
                                                np.abs(data_array[:, 1]) > 1.0)]
         x = data_array[:, 0] - np.delete(local_pos, 1, axis=1)
         y = data_array[:, 1] - np.delete(local_pos, 0, axis=1)
-        scores = np.reshape(np.mean(np.hypot(x, y), axis=1), (10, 10))
+        scores = np.reshape(np.mean(np.hypot(x, y), axis=1), (10, 20))
         norm = np.linalg.norm(scores)
         scores = scores / norm
         return scores
