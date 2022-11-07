@@ -21,46 +21,30 @@ def main():
 class DWA:
     def __init__(self, publisher):
         rospy.Subscriber('dwa_motion_start', String, self.control_callback)
-        rospy.Subscriber('camera1_aruco_xyz', Pose, self.camera_callback)
         rospy.Subscriber('current_pose', Pose, self.current_pose)
-        rospy.Subscriber('which_print', String, self.print_callback)
         self.output = rospy.Publisher('dwa_motion_fin', String, queue_size=1)
         self.publisher = publisher
         self.scout_pose = Pose2D()
-        self.goal_pos = [[0.00, 0.00], [0.00, 0.00], [0.00, 0.00]]
-        self.home_pos = [0.00, 0.00]
-        self.goal = list()
         self.dwa_mode = "none"
-        self.prn = "dwa"
+        self.goal_pos = [[-7.4, 3.64], [7.0, -0.89], [6.87, -1.11], [7.64, 0.948], [8.81, 3.16], [9.36, 4.64]]
+        self.home_pos = [[-6.17, 11.9], [-7.53, 10.7], [-7.89, 9.74]]
+        self.goal = list()
+        self.goal_len = 0
         self.check_point = 0
 
     def control_callback(self, data):
         self.dwa_mode = data.data
-        if self.prn == "control":
-            rospy.loginfo("{}".format(self.dwa_mode))
-
-    def camera_callback(self, data):
-        self.goal_pos.append([data.position.x, data.position.y])
-        self.check_point = len(self.goal_pos) - 1
-        if self.prn == "aruco":
-            rospy.loginfo("{} {}".format(self.goal_pos[0], self.goal_pos[1]))
 
     def slam_callback(self, data):
         self.scout_pose.x = data.position.x
         self.scout_pose.y = data.position.y
         _, _, self.scout_pose.theta = tf.transformations.euler_from_quaternion(
             [data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w])
-        if self.prn == "slam":
-            rospy.loginfo("{} {} {}".format(self.scout_pose.x, self.scout_pose.x, self.scout_pose.theta))
-
-    def print_callback(self, data):
-        self.prn = data.data
     
     def lds_callback(self, velo):
         turtle_vel = Twist()
-        mps = [0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.22, 0.24, 0.26, 0.28]
-        radps = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
-                 -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8, -0.9]
+        mps = [0.3, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.4, 0.45, 0.5]
+        radps = [0, 0.1, 0.3, 0.5, 0.7, 0.9, -0.1, -0.3, -0.5, -0.7]
         data = orh.rospc_to_o3dpc(velo)
         data_array = self.preprocessing(data)
         local_pos = self.make_combination(mps, radps)
@@ -68,35 +52,43 @@ class DWA:
         if self.dwa_mode == "go_to_aruco":
             self.goal = self.goal_pos[self.check_point]
         elif self.dwa_mode == "go_to_home":
-            self.goal = self.home_pos
+            self.goal = self.home_pos[self.check_point]
         else:
-            self.output.publish("none")
             return
-        if np.hypot(self.goal[0] - self.scout_pose.x, self.goal[1] - self.scout_pose.y) <= 0.8 \
-                and self.check_point < len(self.goal_pos) - 1:
+        if np.hypot(self.goal[0] - self.scout_pose.x, self.goal[1] - self.scout_pose.y) <= 0.8:
             turtle_vel.linear.x, turtle_vel.angular.z = 0., 0.
-            self.check_point += 1
-        elif np.hypot(self.goal[0] - self.scout_pose.x, self.goal[1] - self.scout_pose.y) <= 0.8:
-            turtle_vel.linear.x, turtle_vel.angular.z = 0., 0.
-            self.check_point = 0
-            self.dwa_mode = "none"
-            self.output.publish("dwa_fin")
+            if self.dwa_mode == "go_to_aruco":
+                self.goal_len = len(self.goal_pos)
+                if self.check_point < self.goal_len - 1:
+                    self.check_point += 1
+                else:
+                    self.check_point = 0
+                    self.output.publish("go_to_aruco_fin")
+                    self.dwa_mode = "none"
+            elif self.dwa_mode == "go_to_home":
+                self.goal_len = len(self.home_pos)
+                if self.check_point < self.goal_len - 1:
+                    self.check_point += 1
+                else:
+                    self.check_point = 0
+                    self.output.publish("go_to_home_fin")
+                    self.dwa_mode = "none"
         else:
             best_score, back_check = self.evaluate_scores(pos_candidates, self.goal, data_array, local_pos)
             turtle_vel.linear.x, turtle_vel.angular.z = mps[best_score[0]], radps[best_score[1]]
+            if self.check_point == self.goal_len - 1:
+                turtle_vel.linear.x, turtle_vel.angular.z = mps[best_score[0]] / 2, radps[best_score[1]] / 5
             if back_check:
                 turtle_vel.linear.x = mps[best_score[0]] * -1
-        if self.prn == "dwa":
-            rospy.loginfo("{} {}".format(turtle_vel.linear.x, turtle_vel.angular.z))
         self.publisher.publish(turtle_vel)
 
     @staticmethod
     def preprocessing(data):
         data_array = np.asarray(data.points)
-        data_array = data_array[(data_array[:, 0] > -0.45 or data_array[:, 0] < -0.47)
-                                and np.abs(data_array[:, 1]) > 0.16]
-        data_array = data_array[-0.55 < data_array[:, 2] < 0.5]
-        data_array = data_array[-0.1 < data_array[:, 0] < 2.0 and -2.0 < data_array[:, 1] < 2.0]
+        data_array = data_array[np.logical_and(np.logical_or(data_array[:, 0] > -0.45, data_array[:, 0] < -0.47),
+                                               np.abs(data_array[:, 1]) > 0.17)]
+        data_array = data_array[np.logical_and(data_array[:, 2] > -0.55, data_array[:, 2] < 0.5)]
+        data_array = data_array[data_array[:, 0] > -0.45]
         return data_array
 
     @staticmethod
